@@ -1,18 +1,22 @@
-pub const BYE: &str = "BYE";
-pub const RESET: &str = "RESET";
-pub const END: &str = "END";
-pub const HELP: &str = "HELP";
-pub const QUIT: &str = "QUIT";
-pub const OPTION: &str = "OPTION";
-pub const CANCEL: &str = "CANCEL";
-pub const NOP: &str = "NOP";
+use strum::{AsRefStr, Display, EnumString};
 
-// Response
-pub const OK: &str = "OK";
-pub const ERR: &str = "ERR";
-pub const S: &str = "S";
-pub const INQUIRE: &str = "INQUIRE";
+#[derive(Clone, PartialEq, Debug, EnumString, Display, AsRefStr)]
+#[strum(serialize_all = "UPPERCASE")]
+pub enum Command {
+    Bye,
+    Reset,
+    End,
+    Help,
+    Quit,
+    Option,
+    Cancel,
+    Nop,
+    Ok,
+    Err,
+    S,
+    Inquire,
+    D,
 
-// Request/Response
-pub const D: &str = "D";
-pub const COMMENT: &str = "#";
+    #[strum(serialize = "#")]
+    Comment,
+}

@@ -1,12 +1,12 @@
-use crate::command;
+use crate::command::Command;
 use std::fmt;
 
 // https://www.gnupg.org/documentation/manuals/assuan/Client-requests.html#Client-requests
 #[derive(PartialEq, Debug)]
-pub enum Request<'a> {
+pub enum Request {
     // Lines beginning with a # or empty lines are ignored.
     // This is useful to comment test scripts.
-    Comment(Option<&'a str>),
+    Comment(Option<String>),
 
     // Sends raw data to the server. There must be exactly one space after the ’D’.
     // The values for ’%’, CR and LF must be percent escaped.
@@ -15,7 +15,7 @@ pub enum Request<'a> {
     // Other characters may be percent escaped for easier debugging.
     // All Data lines are considered one data stream up to the OK or ERR response.
     // Status and Inquiry Responses may be mixed with the Data lines.
-    D(&'a str),
+    D(String),
 
     // Close the connection.
     // The server will respond with OK.
@@ -40,34 +40,34 @@ pub enum Request<'a> {
     // Leading and trailing spaces around name and value are allowed but should be ignored.
     // For compatibility reasons, name may be prefixed with two dashes.
     // The use of the equal sign is optional but suggested if value is given.
-    Option((&'a str, Option<&'a str>)),
+    Option((String, Option<String>)),
 
     // This command is reserved for future extensions.
     Cancel,
 
     Nop,
 
-    Unknown((&'a str, Option<&'a str>)),
+    Unknown((String, Option<String>)),
 }
 
-impl fmt::Display for Request<'_> {
+impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Bye => write!(f, "{}", command::BYE),
-            Self::Reset => write!(f, "{}", command::RESET),
-            Self::End => write!(f, "{}", command::END),
-            Self::Help => write!(f, "{}", command::HELP),
-            Self::Quit => write!(f, "{}", command::QUIT),
-            Self::Cancel => write!(f, "{}", command::CANCEL),
-            Self::Nop => write!(f, "{}", command::NOP),
+            Self::Bye => write!(f, "{}", Command::Bye),
+            Self::Reset => write!(f, "{}", Command::Reset),
+            Self::End => write!(f, "{}", Command::End),
+            Self::Help => write!(f, "{}", Command::Help),
+            Self::Quit => write!(f, "{}", Command::Quit),
+            Self::Cancel => write!(f, "{}", Command::Cancel),
+            Self::Nop => write!(f, "{}", Command::Nop),
 
-            Self::D(v) => write!(f, "{} {}", command::D, v),
+            Self::D(v) => write!(f, "{} {}", Command::D, v),
 
-            Self::Comment(None) => write!(f, "{}", command::COMMENT),
-            Self::Comment(Some(v)) => write!(f, "{} {}", command::COMMENT, v),
+            Self::Comment(None) => write!(f, "{}", Command::Comment),
+            Self::Comment(Some(v)) => write!(f, "{} {}", Command::Comment, v),
 
-            Self::Option((k, None)) => write!(f, "{} {}", command::OPTION, k),
-            Self::Option((k, Some(v))) => write!(f, "{} {}={}", command::OPTION, k, v),
+            Self::Option((k, None)) => write!(f, "{} {}", Command::Option, k),
+            Self::Option((k, Some(v))) => write!(f, "{} {}={}", Command::Option, k, v),
 
             Self::Unknown((c, None)) => write!(f, "{}", c),
             Self::Unknown((c, Some(p))) => write!(f, "{} {}", c, p),
@@ -75,92 +75,102 @@ impl fmt::Display for Request<'_> {
     }
 }
 
-impl<'a> From<&'a str> for Request<'a> {
-    fn from(input: &'a str) -> Self {
+impl From<&str> for Request {
+    fn from(input: &str) -> Self {
         let command_and_parameters = match input.split_once(' ') {
-            None => (input, None),
-            Some((a, "")) => (a.trim(), None),
-            Some((a, b)) => (a.trim(), Some(b.trim())),
+            None => (String::from(input), None),
+            Some((a, "")) => (String::from(a.trim()), None),
+            Some((a, b)) => (String::from(a.trim()), Some(String::from(b.trim()))),
         };
 
-        if command_and_parameters.0[..1].eq(command::COMMENT) {
-            return Self::Comment(command_and_parameters.1);
+        if command_and_parameters.0[..1].eq(Command::Comment.as_ref()) {
+            return match input[1..].trim() {
+                "" => Self::Comment(None),
+                s => Self::Comment(Some(String::from(s))),
+            };
         }
 
-        match command_and_parameters {
-            (command::BYE, _) => Self::Bye,
-            (command::RESET, _) => Self::Reset,
-            (command::END, _) => Self::End,
-            (command::HELP, _) => Self::Help,
-            (command::QUIT, _) => Self::Quit,
+        let command = Command::try_from(command_and_parameters.0.as_ref());
+        if command.is_err() {
+            return Self::Unknown(command_and_parameters);
+        }
 
-            (command::OPTION, Some(arg)) => match arg.split_once('=') {
-                Some((k, v)) => Self::Option((k, Some(v))),
+        match (command.unwrap(), command_and_parameters.clone().1) {
+            (Command::Bye, _) => Self::Bye,
+            (Command::Reset, _) => Self::Reset,
+            (Command::End, _) => Self::End,
+            (Command::Help, _) => Self::Help,
+            (Command::Quit, _) => Self::Quit,
+
+            (Command::Option, Some(arg)) => match arg.split_once('=') {
+                Some((k, v)) => Self::Option((k.trim().into(), Some(v.trim().into()))),
                 None => match arg.split_once(' ') {
-                    Some((k, v)) => Self::Option((k, Some(v))),
-                    None => Self::Option((arg, None)),
+                    Some((k, v)) => Self::Option((k.trim().into(), Some(v.trim().into()))),
+                    None => Self::Option((arg.trim().into(), None)),
                 },
             },
 
-            (command::CANCEL, _) => Self::Cancel,
-            (command::NOP, _) => Self::Nop,
+            (Command::Cancel, _) => Self::Cancel,
+            (Command::Nop, _) => Self::Nop,
 
-            (command::D, Some(p)) => Self::D(p),
-            (command, parameters) => Self::Unknown((command, parameters)),
+            (Command::D, Some(p)) => Self::D(p),
+            (_, _) => Self::Unknown(command_and_parameters),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::command;
+    use crate::command::Command;
     use crate::request::Request;
 
     #[test]
     fn test_request_from() {
-        assert_eq!(Request::from(command::BYE), Request::Bye);
-        assert_eq!(Request::from(command::RESET), Request::Reset);
-        assert_eq!(Request::from(command::END), Request::End);
-        assert_eq!(Request::from(command::HELP), Request::Help);
-        assert_eq!(Request::from(command::QUIT), Request::Quit);
-        assert_eq!(Request::from(command::CANCEL), Request::Cancel);
-        assert_eq!(Request::from(command::NOP), Request::Nop);
+        assert_eq!(Request::from(Command::Bye.as_ref()), Request::Bye);
+        assert_eq!(Request::from(Command::Reset.as_ref()), Request::Reset);
+        assert_eq!(Request::from(Command::End.as_ref()), Request::End);
+        assert_eq!(Request::from(Command::Help.as_ref()), Request::Help);
+        assert_eq!(Request::from(Command::Quit.as_ref()), Request::Quit);
+        assert_eq!(Request::from(Command::Cancel.as_ref()), Request::Cancel);
+        assert_eq!(Request::from(Command::Nop.as_ref()), Request::Nop);
 
-        assert_eq!(Request::from(command::COMMENT), Request::Comment(None));
+        assert_eq!(Request::from("#"), Request::Comment(None));
         assert_eq!(
-            Request::from(format!("{} {}", command::COMMENT, "some content").as_str()),
-            Request::Comment(Some("some content"))
-        );
-
-        assert_eq!(
-            Request::from(command::OPTION),
-            Request::Unknown((command::OPTION, None))
+            Request::from("# some content"),
+            Request::Comment(Some("some content".into()))
         );
         assert_eq!(
-            Request::from(format!("{} {}", command::OPTION, "OPTION").as_str()),
-            Request::Option(("OPTION", None))
-        );
-        assert_eq!(
-            Request::from(format!("{} {} {}", command::OPTION, "OPTION", "VALUE").as_str()),
-            Request::Option(("OPTION", Some("VALUE")))
-        );
-        assert_eq!(
-            Request::from(format!("{} {}={}", command::OPTION, "OPTION", "VALUE").as_str()),
-            Request::Option(("OPTION", Some("VALUE")))
+            Request::from("#### some content"),
+            Request::Comment(Some("### some content".into()))
         );
 
         assert_eq!(
-            Request::from(command::D),
-            Request::Unknown((command::D, None))
+            Request::from("OPTION"),
+            Request::Unknown(("OPTION".into(), None))
         );
         assert_eq!(
-            Request::from(format!("{} {}", command::D, "DATA").as_str()),
-            Request::D("DATA")
+            Request::from("OPTION option"),
+            Request::Option(("option".into(), None))
         );
+        assert_eq!(
+            Request::from("OPTION option value"),
+            Request::Option(("option".into(), Some("value".into())))
+        );
+        assert_eq!(
+            Request::from("OPTION option=value"),
+            Request::Option(("option".into(), Some("value".into())))
+        );
+        assert_eq!(
+            Request::from("OPTION option    =  value"),
+            Request::Option(("option".into(), Some("value".into())))
+        );
+
+        assert_eq!(Request::from("D"), Request::Unknown(("D".into(), None)));
+        assert_eq!(Request::from("D with data"), Request::D("with data".into()));
 
         assert_eq!(
             Request::from("UNKNOWN"),
-            Request::Unknown(("UNKNOWN", None))
+            Request::Unknown(("UNKNOWN".into(), None))
         );
     }
 }

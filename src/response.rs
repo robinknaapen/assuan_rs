@@ -1,19 +1,34 @@
-use crate::command;
+use crate::command::Command;
+use crate::errors;
 use std::fmt;
 
-// https://www.gnupg.org/documentation/manuals/assuan/Server-responses.html#Server-responses
 #[derive(PartialEq, Debug)]
-pub enum Response<'a> {
+pub enum ResponseErr {
+    Gpg(errors::GpgErrorCode),
+    Custom(errors::Custom),
+}
+
+impl fmt::Display for ResponseErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gpg(s) => write!(f, "{}", s),
+            Self::Custom(s) => write!(f, "{}", s),
+        }
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum Response {
     // Request was successful.
-    Ok(Option<&'a str>),
+    Ok(Option<String>),
 
     // Request could not be fulfilled. The possible error codes are defined by libgpg-error.
-    Err((&'a str, Option<&'a str>)),
+    Err((ResponseErr, Option<String>)),
 
     // Informational output by the server, which is still processing the request.
     // A client may not send such lines to the server while processing an Inquiry command.
     // keyword shall start with a letter or an underscore.
-    S((&'a str, &'a str)),
+    S((String, String)),
 
     // Raw data returned to client. There must be exactly one space after the ’D’.
     // The values for ’%’, CR and LF must be percent escaped; these are encoded as %25, %0D and %0A, respectively.
@@ -21,36 +36,36 @@ pub enum Response<'a> {
     // Other characters may be percent escaped for easier debugging.
     // All Data lines are considered one data stream up to the OK or ERR response.
     // Status and Inquiry Responses may be mixed with the Data lines.
-    D(&'a str),
+    D(String),
 
     // The server needs further information from the client.
     // The client should respond with data (using the “D” command and terminated by “END”).
     // Alternatively, the client may cancel the current operation by responding with “CAN”.
-    Inquire((&'a str, &'a str)),
+    Inquire((String, String)),
 
     // Comment line issued only for debugging purposes.
     // Totally ignored.
-    Comment(Option<&'a str>),
+    Comment(Option<String>),
 
-    Custom((&'a str, Option<&'a str>)),
+    Custom((String, Option<String>)),
 }
 
-impl fmt::Display for Response<'_> {
+impl fmt::Display for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Response::D(v) => write!(f, "{} {}", command::D, v),
+            Response::D(v) => write!(f, "{} {}", Command::D, v),
 
-            Response::S((k, v)) => write!(f, "{} {} {}", command::S, k, v),
-            Response::Inquire((k, v)) => write!(f, "{} {} {}", command::INQUIRE, k, v),
+            Response::S((k, v)) => write!(f, "{} {} {}", Command::S, k, v),
+            Response::Inquire((k, v)) => write!(f, "{} {} {}", Command::Inquire, k, v),
 
-            Self::Comment(None) => write!(f, "{}", command::COMMENT),
-            Self::Comment(Some(v)) => write!(f, "{} {}", command::COMMENT, v),
+            Self::Comment(None) => write!(f, "{}", Command::Comment),
+            Self::Comment(Some(v)) => write!(f, "{} {}", Command::Comment, v),
 
-            Response::Ok(None) => write!(f, "{}", command::OK),
-            Response::Ok(Some(v)) => write!(f, "{} {}", command::OK, v),
+            Response::Ok(None) => write!(f, "{}", Command::Ok),
+            Response::Ok(Some(v)) => write!(f, "{} {}", Command::Ok, v),
 
-            Response::Err((id, None)) => write!(f, "{} {}", command::ERR, id),
-            Response::Err((id, Some(v))) => write!(f, "{} {} {}", command::ERR, id, v),
+            Response::Err((id, None)) => write!(f, "{} {}", Command::Err, id),
+            Response::Err((id, Some(v))) => write!(f, "{} {} {}", Command::Err, id, v),
 
             Response::Custom((s, None)) => write!(f, "{}", s),
             Response::Custom((s, Some(v))) => write!(f, "{} {}", s, v),
@@ -58,113 +73,143 @@ impl fmt::Display for Response<'_> {
     }
 }
 
-impl<'a> From<&'a str> for Response<'a> {
-    fn from(input: &'a str) -> Self {
+impl From<&str> for Response {
+    fn from(input: &str) -> Self {
         let command_and_parameters = match input.split_once(' ') {
-            None => (input, None),
-            Some((a, "")) => (a.trim(), None),
-            Some((a, b)) => (a.trim(), Some(b.trim())),
+            None => (String::from(input), None),
+            Some((a, "")) => (String::from(a.trim()), None),
+            Some((a, b)) => (String::from(a.trim()), Some(String::from(b.trim()))),
         };
 
-        if command_and_parameters.0[..1].eq(command::COMMENT) {
-            return Self::Comment(command_and_parameters.1);
+        if command_and_parameters.0[..1].eq(Command::Comment.as_ref()) {
+            return match input[1..].trim() {
+                "" => Self::Comment(None),
+                s => Self::Comment(Some(String::from(s))),
+            };
         }
 
-        println!("{}", input);
-        match command_and_parameters {
-            (command::OK, v) => Self::Ok(v),
-            (command::D, Some(p)) => Self::D(p),
+        let command = Command::try_from(command_and_parameters.0.as_str());
+        if command.is_err() {
+            return Self::Custom(command_and_parameters);
+        }
 
-            (command::ERR, Some(p)) => match p.split_once(' ') {
-                None => Self::Err((p, None)),
-                Some((e, "")) => Self::Err((e, None)),
-                Some((e, v)) => Self::Err((e, Some(v))),
+        match (command.unwrap(), command_and_parameters.clone().1) {
+            (Command::Ok, v) => Self::Ok(v),
+            (Command::D, Some(p)) => Self::D(p),
+
+            (Command::Err, Some(p)) => {
+                let (e, p) = match p.split_once(' ') {
+                    None => (p, None),
+                    Some((e, "")) => (String::from(e), None),
+                    Some((e, v)) => (String::from(e), Some(String::from(v))),
+                };
+
+                let error_code = errors::GpgErrorCode::try_from(e.as_str());
+                if let Ok(ec) = error_code {
+                    return Self::Err((ResponseErr::Gpg(ec), p));
+                }
+
+                let error_code = errors::Custom::try_from(e.as_str());
+                if let Ok(ec) = error_code {
+                    return Self::Err((ResponseErr::Custom(ec), p));
+                }
+
+                Self::Err((ResponseErr::Gpg(errors::GpgErrorCode::UnknownErrno), p))
+            }
+
+            (Command::Inquire, Some(p)) => match p.split_once(' ') {
+                None => Self::Custom((Command::Inquire.to_string(), Some(p))),
+                Some((_, "")) => Self::Custom((Command::Inquire.to_string(), Some(p))),
+                Some((k, v)) => Self::Inquire((String::from(k), String::from(v))),
             },
 
-            (command::INQUIRE, Some(p)) => match p.split_once(' ') {
-                None => Self::Custom(command_and_parameters),
-                Some((_, "")) => Self::Custom(command_and_parameters),
-                Some((k, v)) => Self::Inquire((k, v)),
+            (Command::S, Some(p)) => match p.split_once(' ') {
+                None => Self::Custom((Command::S.to_string(), Some(p))),
+                Some((_, "")) => Self::Custom((Command::S.to_string(), Some(p))),
+                Some((k, v)) => Self::S((String::from(k), String::from(v))),
             },
 
-            (command::S, Some(p)) => match p.split_once(' ') {
-                None => Self::Custom(command_and_parameters),
-                Some((_, "")) => Self::Custom(command_and_parameters),
-                Some((k, v)) => Self::S((k, v)),
-            },
-
-            (command, parameters) => Self::Custom((command, parameters)),
+            _ => Self::Custom(command_and_parameters),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::command;
-    use crate::response::Response;
+    use crate::command::Command;
+    use crate::errors;
+    use crate::response::{Response, ResponseErr};
 
     #[test]
     fn test_response_from() {
-        assert_eq!(Response::from(command::OK), Response::Ok(None));
+        assert_eq!(Response::from("OK"), Response::Ok(None));
         assert_eq!(
-            Response::from(format!("{} {}", command::OK, "data").as_str()),
-            Response::Ok(Some("data")),
+            Response::from(format!("{} {}", Command::Ok, "data").as_str()),
+            Response::Ok(Some("data".into())),
         );
 
         assert_eq!(
-            Response::from(command::ERR),
-            Response::Custom((command::ERR, None))
+            Response::from("ERR"),
+            Response::Custom(("ERR".into(), None))
         );
         assert_eq!(
-            Response::from(format!("{} {}", command::ERR, "id").as_str()),
-            Response::Err(("id", None))
+            Response::from("ERR 16383"),
+            Response::Err((ResponseErr::Gpg(errors::GpgErrorCode::Eof), None))
         );
         assert_eq!(
-            Response::from(format!("{} {} {}", command::ERR, "id", "a description").as_str()),
-            Response::Err(("id", Some("a description")))
+            Response::from("ERR 16383 with description"),
+            Response::Err((
+                ResponseErr::Gpg(errors::GpgErrorCode::Eof),
+                Some("with description".into())
+            ))
+        );
+        assert_eq!(
+            Response::from(format!("ERR {} with description", (1 << 15 | 140) + 1).as_str()),
+            Response::Err((
+                ResponseErr::Custom(errors::Custom((1 << 15 | 140) + 1)),
+                Some("with description".into())
+            ))
+        );
+
+        assert_eq!(Response::from("S"), Response::Custom(("S".into(), None)));
+        assert_eq!(
+            Response::from("S keyword"),
+            Response::Custom(("S".into(), Some("keyword".into())))
+        );
+        assert_eq!(
+            Response::from("S keyword status information"),
+            Response::S(("keyword".into(), "status information".into()))
         );
 
         assert_eq!(
-            Response::from(command::S),
-            Response::Custom((command::S, None))
+            Response::from("INQUIRE"),
+            Response::Custom(("INQUIRE".into(), None)),
         );
         assert_eq!(
-            Response::from(format!("{} {}", command::S, "keyword").as_str()),
-            Response::Custom((command::S, Some("keyword")))
+            Response::from("INQUIRE keyword"),
+            Response::Custom(("INQUIRE".into(), Some("keyword".into())))
         );
         assert_eq!(
-            Response::from(
-                format!("{} {} {}", command::S, "keyword", "status information").as_str()
-            ),
-            Response::S(("keyword", "status information"))
+            Response::from("INQUIRE keyword params"),
+            Response::Inquire(("keyword".into(), "params".into()))
         );
 
+        assert_eq!(Response::from("D"), Response::Custom(("D".into(), None)),);
         assert_eq!(
-            Response::from(command::INQUIRE),
-            Response::Custom((command::INQUIRE, None)),
-        );
-        assert_eq!(
-            Response::from(format!("{} {}", command::INQUIRE, "keyword").as_str()),
-            Response::Custom((command::INQUIRE, Some("keyword")))
-        );
-        assert_eq!(
-            Response::from(format!("{} {} {}", command::INQUIRE, "keyword", "params").as_str()),
-            Response::Inquire(("keyword", "params"))
+            Response::from("D some data"),
+            Response::D("some data".into()),
         );
 
+        assert_eq!(Response::from("#"), Response::Comment(None),);
         assert_eq!(
-            Response::from(command::D),
-            Response::Custom((command::D, None)),
-        );
-        assert_eq!(
-            Response::from(format!("{} {}", command::D, "some data").as_str()),
-            Response::D("some data"),
+            Response::from("# comment data"),
+            Response::Comment(Some("comment data".into())),
         );
 
-        assert_eq!(Response::from(command::COMMENT), Response::Comment(None),);
+        assert_eq!(Response::from("#"), Response::Comment(None),);
         assert_eq!(
-            Response::from(format!("{} {}", command::COMMENT, "comment data").as_str()),
-            Response::Comment(Some("comment data")),
+            Response::from("### comment data"),
+            Response::Comment(Some("## comment data".into())),
         );
     }
 }
